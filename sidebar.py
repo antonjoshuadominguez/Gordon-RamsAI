@@ -24,7 +24,6 @@ def sidebar():
 
     st.sidebar.divider()
 
-    # Chat management
     if "chats" not in st.session_state:
         st.session_state.chats = [{"name": "Chat 1", "messages": [
             {

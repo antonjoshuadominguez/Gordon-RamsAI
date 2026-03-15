@@ -1,17 +1,14 @@
 ﻿import google.genai as genai
 import streamlit as st
 
-# Configure Google AI API
 client = genai.Client(api_key=st.secrets["google"]["api_key"])
 
 def generate_response(messages, profile):
-    # Security check for prompt injection
     last_user_msg = messages[-1]["content"].lower()
     threat_keywords = ["ignore instructions", "override", "system prompt", "jailbreak", "bypass"]
     if any(keyword in last_user_msg for keyword in threat_keywords):
         return "Drop and give me 10 pushups!", {}
 
-    # The system prompt sets the assistant's behavior, safety constraints, and response style.
     system_prompt = f"""
     You are Gordon RamsAi, a helpful AI fitness and nutrition assistant.
 
@@ -51,14 +48,14 @@ def generate_response(messages, profile):
     - Encourage balanced habits and realistic goals.
 
     Always keep responses structured and easy to read. Use markdown-style bullets or numbered lists.
+
+    Strictly enforce your scope: Only respond to queries related to fitness, nutrition, cooking, and exercises. For any other topic, respond that it is not within your scope and instruct the user to do pushups as a consequence. Start with 10 pushups for the first off-topic question, and increase by 10 for each subsequent off-topic question in the conversation (e.g., if it's the second, say 20 pushups, third 30, etc.). Do not answer off-topic questions.
     """
 
-    # Configure Google AI
     client = genai.Client(api_key=st.secrets["google"]["api_key"])
 
-    # Convert messages to Google format, skipping the initial assistant message
     history = []
-    for msg in messages[1:]:  # skip the initial assistant message
+    for msg in messages[1:]:  
         if msg["role"] == "user":
             history.append(genai.types.Content(role="user", parts=[genai.types.Part(text=msg["content"])]))
         elif msg["role"] == "assistant":
@@ -70,7 +67,6 @@ def generate_response(messages, profile):
         history=history
     )
 
-    # The last message is the new user message
     last_msg = messages[-1]["content"]
     response = chat.send_message(last_msg)
 
