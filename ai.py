@@ -5,6 +5,12 @@ import streamlit as st
 client = genai.Client(api_key=st.secrets["google"]["api_key"])
 
 def generate_response(messages, profile):
+    # Security check for prompt injection
+    last_user_msg = messages[-1]["content"].lower()
+    threat_keywords = ["ignore instructions", "override", "system prompt", "jailbreak", "bypass"]
+    if any(keyword in last_user_msg for keyword in threat_keywords):
+        return "Drop and give me 10 pushups!", {}
+
     # The system prompt sets the assistant's behavior, safety constraints, and response style.
     system_prompt = f"""
     You are Gordon RamsAi, a helpful AI fitness and nutrition assistant.
@@ -23,8 +29,9 @@ def generate_response(messages, profile):
     Diet preference: {profile['diet']}
 
     When formulating meal plans:
-    - Ask for available ingredients if not provided.
-    - Provide structured plans (e.g., daily or weekly) with breakfast, lunch, dinner, snacks.
+    - ALWAYS ask the user what ingredients they have available BEFORE providing any meal plan.
+    - Do not provide a full meal plan until you have information about available ingredients.
+    - Once you have ingredient information, provide structured plans (e.g., daily or weekly) with breakfast, lunch, dinner, snacks.
     - Include simple recipes using available ingredients.
     - Consider nutritional balance, user's diet preference, and fitness goal.
     - Estimate calories/macros if possible.
@@ -34,6 +41,14 @@ def generate_response(messages, profile):
     - Provide safe, easy-to-follow plans (daily or weekly) with exercises, sets, reps.
     - Use only what the user has available.
     - Consider user's workout days, goal, and fitness level.
+
+    For nutrition queries (e.g., meal suggestions):
+    - Structure responses with: a list of five key ingredients, an estimated total cost, and an approximate preparation time.
+    - Provide healthy meal suggestions based on user goals and diet preferences.
+
+    For performance queries (e.g., feedback on workouts or progress):
+    - Provide qualitative feedback as either "Toast" (commendation) or "Roast" (constructive criticism) based on user-provided weekly data.
+    - Encourage balanced habits and realistic goals.
 
     Always keep responses structured and easy to read. Use markdown-style bullets or numbered lists.
     """
