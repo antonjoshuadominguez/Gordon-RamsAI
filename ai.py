@@ -1,4 +1,4 @@
-﻿import google.genai as genai
+﻿import google.generativeai as genai
 from google.genai import errors
 import streamlit as st
 import re
