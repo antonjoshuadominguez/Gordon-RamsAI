@@ -24,7 +24,9 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
-If `google.genai` / `genai.Client` fails to import, install Google’s current GenAI SDK (for example `google-genai`) to match your `ai.py` imports.
+**Streamlit Community Cloud** reads `requirements.txt` and optional **`runtime.txt`** (this repo pins **Python 3.12** for consistent builds). Langfuse integration targets the **v4** client (`langfuse>=4,<5`); tracing is best-effort so chat still works if Langfuse fails.
+
+If `google.genai` / `genai.Client` fails to import, ensure **`google-genai`** is installed (see `requirements.txt`).
 
 ## Configuration
 

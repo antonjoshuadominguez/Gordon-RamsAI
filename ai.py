@@ -3,7 +3,7 @@ from google.genai import errors
 import streamlit as st
 import re
 import random
-from langfuse import Langfuse
+from langfuse import Langfuse, propagate_attributes
 
 # Lazily created — import-time failures on Streamlit Cloud were silently cleared before.
 _GEMINI_CLIENT = None
@@ -78,6 +78,16 @@ try:
     )
 except Exception:
     langfuse = None
+
+
+def _langfuse_usable() -> bool:
+    """Langfuse v4+ API (Cloud may install a different minor; degrade gracefully)."""
+    return bool(
+        langfuse
+        and hasattr(langfuse, "create_trace_id")
+        and hasattr(langfuse, "start_as_current_observation")
+    )
+
 
 def record_langfuse_rating(trace_id: str, value: float, comment: str | None = None) -> bool:
     """Attach a numeric user score to an existing Langfuse trace."""
@@ -235,25 +245,30 @@ def generate_response(
     if is_prompt_injection(last_user_msg):
         fallback = get_fallback_message()
         trace_id = None
-        if langfuse and user_id and hasattr(langfuse, "create_trace_id"):
+        if _langfuse_usable() and user_id:
             try:
                 trace_id = langfuse.create_trace_id()
-                with langfuse.start_as_current_span(
-                    trace_context={"trace_id": trace_id},
-                    name="gordon_ramsai_blocked_injection",
-                    input=last_user_msg,
-                    output=fallback,
-                    metadata={"blocked": True},
+                with propagate_attributes(
+                    user_id=str(user_id),
+                    session_id=str(session_id) if session_id else None,
+                    trace_name="Gordon RamsAi Chat",
                 ):
-                    langfuse.update_current_trace(
-                        user_id=user_id,
-                        session_id=session_id,
-                        name="Gordon RamsAi Chat",
-                        metadata={"blocked_injection": True},
-                    )
+                    with langfuse.start_as_current_observation(
+                        trace_context={"trace_id": trace_id},
+                        name="gordon_ramsai_blocked_injection",
+                        as_type="span",
+                        input=last_user_msg,
+                        output=fallback,
+                        metadata={"blocked": True, "blocked_injection": True},
+                    ):
+                        pass
                 langfuse.flush()
             except Exception:
                 trace_id = None
+                try:
+                    langfuse.flush()
+                except Exception:
+                    pass
         return fallback, {}, trace_id
 
     safe_profile = sanitize_profile(profile)
@@ -404,41 +419,38 @@ def generate_response(
                 return get_busy_kitchen_message(), False
             return get_model_error_roast(), False
 
-    use_langfuse = bool(langfuse and user_id and hasattr(langfuse, "create_trace_id"))
+    # Run the model first so Langfuse can never break the user-facing reply (deploy-safe).
+    response_text, leaked = _gemini_with_recovery()
+
     trace_id = None
-
-    if use_langfuse:
-        trace_id = langfuse.create_trace_id()
-        with langfuse.start_as_current_span(
-            trace_context={"trace_id": trace_id},
-            name="gordon_ramsai_turn",
-            input=last_user_msg,
-            metadata={
-                "goal": safe_profile["goal"],
-                "allergies": safe_profile["allergies"],
-            },
-        ) as span:
-            try:
-                langfuse.update_current_trace(
-                    user_id=user_id,
-                    session_id=session_id,
-                    name="Gordon RamsAi Chat",
-                    metadata={"app": "gordon_ramsai"},
-                )
-                response_text, leaked = _gemini_with_recovery()
-                span.update(
+    if _langfuse_usable() and user_id:
+        try:
+            trace_id = langfuse.create_trace_id()
+            with propagate_attributes(
+                user_id=str(user_id),
+                session_id=str(session_id) if session_id else None,
+                trace_name="Gordon RamsAi Chat",
+            ):
+                with langfuse.start_as_current_observation(
+                    trace_context={"trace_id": trace_id},
+                    name="gordon_ramsai_turn",
+                    as_type="span",
+                    input=last_user_msg,
                     output=response_text,
-                    metadata={"leak_blocked": leaked},
-                )
+                    metadata={
+                        "goal": safe_profile["goal"],
+                        "allergies": safe_profile["allergies"],
+                        "leak_blocked": leaked,
+                        "app": "gordon_ramsai",
+                    },
+                ):
+                    pass
+            langfuse.flush()
+        except Exception:
+            trace_id = None
+            try:
                 langfuse.flush()
-                return response_text, {}, trace_id
-            except Exception as e:
-                span.update(level="ERROR", status_message=str(e)[:2000])
-                langfuse.flush()
-                return get_model_error_roast(), {}, trace_id
+            except Exception:
+                pass
 
-    try:
-        response_text, leaked = _gemini_with_recovery()
-        return response_text, {}, None
-    except Exception:
-        return get_model_error_roast(), {}, None
+    return response_text, {}, trace_id
