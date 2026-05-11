@@ -8,11 +8,14 @@ from auth_utils import (
     register_user, login_user, get_user_profile,
     update_user_profile, get_current_user, persist_profile_from_chat,
     log_workout, get_recent_workouts, search_meal_library, get_supabase_client,
-    save_meal_to_library, get_best_prs,
+    save_meal_to_library, get_best_prs, get_best_pr_rows,
+    update_workout_log, delete_workout_log,
     list_conversations, create_conversation, list_conversation_messages,
     create_conversation_message, delete_conversation_messages,
     update_conversation_message,
+    supabase_secrets_available, SUPABASE_SECRETS_HELP,
 )
+from workout_parse import extract_workouts_from_text, parse_log_command_body
 
 # ============================================================
 # PAGE CONFIG
@@ -361,16 +364,6 @@ def _strip_meal_library_record(response_text: str) -> str:
         flags=re.IGNORECASE | re.DOTALL
     ).strip()
 
-def _trim_exercise_noise(name: str) -> str:
-    """Strip trailing chat filler ('bench today' -> 'bench')."""
-    return re.sub(
-        r"\s+(today|yesterday|yesterday'?s|tonight|just|earlier|now)\s*$",
-        "",
-        name.strip(),
-        flags=re.IGNORECASE,
-    ).strip()
-
-
 def _strip_log_command_prefix(text: str) -> str | None:
     """If text starts with a log/record/save workout intent, return the remainder; else None."""
     t = text.strip()
@@ -387,50 +380,6 @@ def _strip_log_command_prefix(text: str) -> str | None:
     return None
 
 
-def _parse_workout_log_body(body: str):
-    """Parse exercise/sets/reps/weight from the tail after a log prefix."""
-    b = body.strip()
-    if not b:
-        return None
-
-    def _clean_exercise(name: str) -> str:
-        n = re.sub(r"\s+", " ", name).strip(" -–—:,")
-        return _trim_exercise_noise(n)
-
-    _xr = r"(?:\s*x\s*|x|\s+)"  # "3 x 10", "3x10", or "3 sets 10" style gap
-    patterns = (
-        # bench press 3 sets 10 reps 60kg / squat 5x5 100kg
-        r"^(?P<exercise>.+?)\s+(?P<sets>\d+)(?:\s*sets?)?"
-        + _xr
-        + r"\s*(?P<reps>\d+)(?:\s*reps?)?\s+(?P<weight>\d+(?:\.\d+)?)\s*kg?$",
-        # bench 3 x 10 60kg / bench 3x10 60kg
-        r"^(?P<exercise>.+?)\s+(?P<sets>\d+)(?:\s*x\s*|x)(?P<reps>\d+)\s+(?P<weight>\d+(?:\.\d+)?)\s*kg?$",
-        # bench 3x10 @ 60kg
-        r"^(?P<exercise>.+?)\s+(?P<sets>\d+)(?:\s*x\s*|x)(?P<reps>\d+)\s*@\s*(?P<weight>\d+(?:\.\d+)?)\s*kg?$",
-        # bench press 100kg 3 sets 10
-        r"^(?P<exercise>.+?)\s+(?P<weight>\d+(?:\.\d+)?)\s*kg\s+(?P<sets>\d+)(?:\s*sets?)?"
-        + _xr
-        + r"\s*(?P<reps>\d+)(?:\s*reps?)?$",
-        # 3x10 @ 60kg bench
-        r"^(?P<sets>\d+)(?:\s*x\s*|x)(?P<reps>\d+)\s*@\s*(?P<weight>\d+(?:\.\d+)?)\s*kg\s+(?P<exercise>.+)$",
-    )
-    for pat in patterns:
-        match = re.search(pat, b, flags=re.IGNORECASE)
-        if not match:
-            continue
-        gd = match.groupdict()
-        ex = _clean_exercise(gd["exercise"])
-        if len(ex) < 2:
-            continue
-        return {
-            "exercise": ex,
-            "sets": int(gd["sets"]),
-            "reps": int(gd["reps"]),
-            "weight": float(gd["weight"]),
-        }
-    return None
-
-
 def _parse_workout_log_command(prompt: str):
     """
     Parse commands like:
@@ -442,91 +391,7 @@ def _parse_workout_log_command(prompt: str):
     body = _strip_log_command_prefix(text)
     if body is None:
         return None
-    return _parse_workout_log_body(body)
-
-
-def _parse_workout_from_statement(text: str):
-    """
-    Parse workout-result statements, e.g.:
-    - i just did a PR of 100kg on bench press
-    - i did 80kg on squat
-    - hit 100kg bench today
-    - i just did 100kg squats for 8 reps
-    """
-    normalized = text.strip().lower()
-
-    # "100kg squats for 8 reps" / "did 100 kg bench for 5 reps" (sets default 1)
-    kg_ex_for_reps = re.search(
-        r"(?:^|[\s!?.]|did|done|hit|got)\s*(\d+(?:\.\d+)?)\s*kg\s+([a-z][a-z\s]{2,40}?)\s+for\s+(\d+)\s*reps?\b",
-        normalized,
-    )
-    if kg_ex_for_reps:
-        ex = _trim_exercise_noise(kg_ex_for_reps.group(2).strip())
-        if len(ex) >= 2:
-            return {
-                "exercise": ex,
-                "sets": 1,
-                "reps": int(kg_ex_for_reps.group(3)),
-                "weight": float(kg_ex_for_reps.group(1)),
-            }
-
-    # "squats for 8 reps at 100kg"
-    ex_for_reps_kg = re.search(
-        r"([a-z][a-z\s]{2,40}?)\s+for\s+(\d+)\s*reps?\s+(?:at|@)\s+(\d+(?:\.\d+)?)\s*kg\b",
-        normalized,
-    )
-    if ex_for_reps_kg:
-        ex = _trim_exercise_noise(ex_for_reps_kg.group(1).strip())
-        if len(ex) >= 2:
-            return {
-                "exercise": ex,
-                "sets": 1,
-                "reps": int(ex_for_reps_kg.group(2)),
-                "weight": float(ex_for_reps_kg.group(3)),
-            }
-
-    pr_match = re.search(
-        r"(?:pr|personal record).{0,30}?(\d+(?:\.\d+)?)\s*kg.{0,25}?(?:on|for)?\s*([a-z][a-z\s]{2,50})",
-        normalized,
-    )
-    if pr_match:
-        ex = _trim_exercise_noise(pr_match.group(2).strip().rstrip(".,!?"))
-        return {
-            "exercise": ex,
-            "sets": 1,
-            "reps": 1,
-            "weight": float(pr_match.group(1)),
-        }
-
-    generic_match = re.search(
-        r"(?:i\s+(?:just\s+)?did|i\s+hit|i\s+completed|hit).{0,25}?(\d+(?:\.\d+)?)\s*kg.{0,20}?(?:on|for)?\s*([a-z][a-z\s]{2,50})",
-        normalized,
-    )
-    if generic_match:
-        ex = _trim_exercise_noise(generic_match.group(2).strip().rstrip(".,!?"))
-        return {
-            "exercise": ex,
-            "sets": 1,
-            "reps": 1,
-            "weight": float(generic_match.group(1)),
-        }
-
-    # "100kg bench" / "100 kg on bench press"
-    kg_first = re.search(
-        r"(\d+(?:\.\d+)?)\s*kg.{0,12}?(?:on|for)?\s*([a-z][a-z\s]{2,50}?)(?:[.,!?]|$|\s+today|\s+just)",
-        normalized,
-    )
-    if kg_first:
-        ex = _trim_exercise_noise(kg_first.group(2).strip().rstrip(".,!?"))
-        if len(ex) >= 3:
-            return {
-                "exercise": ex,
-                "sets": 1,
-                "reps": 1,
-                "weight": float(kg_first.group(1)),
-            }
-
-    return None
+    return parse_log_command_body(body)
 
 
 def _workout_turn_hidden_context(
@@ -555,6 +420,32 @@ def _workout_turn_hidden_context(
     )
 
 
+def _workout_turn_hidden_context_multi(
+    payloads: list[dict],
+    *,
+    duplicate_flags: list[bool],
+    log_failed: bool,
+    log_error: str | None,
+) -> str:
+    """Single kitchen_context when multiple lifts were parsed in one turn."""
+    if log_failed:
+        return (
+            f"Workout save(s) FAILED ({log_error or 'unknown'}). "
+            "Stay in character about broken kit — no stack dumps."
+        )
+    if payloads and all(duplicate_flags):
+        return (
+            "They repeated the same lift line(s) you already stored. Roast the redundancy — "
+            "never say 'logged' or 'database'."
+        )
+    bits = [f"{p['exercise']}: {p['sets']}×{p['reps']} @ {p['weight']}kg" for p in payloads]
+    return (
+        "Their lift(s) this turn (for your tone only, not a spreadsheet readout): "
+        + "; ".join(bits)
+        + ". Back-office is handled — Ramsay reaction only, no 'I saved' talk."
+    )
+
+
 def _should_scan_history_for_workout(prompt: str) -> bool:
     """True when the user is asking to persist a prior mention (not only when they said 'workout')."""
     lowered = prompt.lower()
@@ -573,26 +464,27 @@ def _should_scan_history_for_workout(prompt: str) -> bool:
 def _build_workout_signature(payload: dict) -> str:
     return f"{payload['exercise'].lower()}|{payload['sets']}|{payload['reps']}|{payload['weight']}"
 
-def _resolve_workout_payload(prompt: str, messages: list):
+def _resolve_workout_payloads(prompt: str, messages: list) -> list[dict]:
     """
-    Resolve workout payload from:
-    1) explicit log command
-    2) direct workout statement in current prompt
-    3) previous user message when prompt asks to "log that"
+    Resolve zero or more workout payloads (log commands, natural PR lines, or history scan).
     """
-    payload = _parse_workout_log_command(prompt) or _parse_workout_from_statement(prompt)
-    if payload:
-        return payload
-
+    cmd = _parse_workout_log_command(prompt)
+    if cmd:
+        return [cmd]
+    found = extract_workouts_from_text(prompt)
+    if found:
+        return found
     if _should_scan_history_for_workout(prompt):
-        # Scan previous user messages for a parsable workout statement.
         for msg in reversed(messages[:-1]):
             if msg.get("role") != "user":
                 continue
-            historical_payload = _parse_workout_log_command(msg.get("content", "")) or _parse_workout_from_statement(msg.get("content", ""))
-            if historical_payload:
-                return historical_payload
-    return None
+            c = _parse_workout_log_command(msg.get("content", ""))
+            if c:
+                return [c]
+            h = extract_workouts_from_text(msg.get("content", ""))
+            if h:
+                return h
+    return []
 
 # ============================================================
 # LOGIN PAGE
@@ -603,9 +495,12 @@ def show_login_page():
     with col2:
         st.title("🥗 Gordon RamsAi")
         st.subheader("Your Fitness & Nutrition Assistant")
-        
+
+        if not supabase_secrets_available()[0]:
+            st.warning(SUPABASE_SECRETS_HELP)
+
         st.divider()
-        
+
         # Tabs for Login and Register
         tab1, tab2 = st.tabs(["Login", "Register"])
         
@@ -738,11 +633,80 @@ def show_profile_page():
         st.info(f"**User ID:**\n`{user.id}`\n\n**Joined:**\n{profile.get('created_at', 'N/A')[:10]}")
         st.divider()
         st.subheader("🏆 Best Exercises / PRs")
+        st.caption(
+            "Shows your **best weight per exercise** (all attempts stay in history). "
+            "Edit values and click **Save PR changes**, or remove a bad row."
+        )
         try:
             supabase = get_supabase_client()
-            best_prs = get_best_prs(supabase, user.id, limit=10)
-            if best_prs:
-                st.table(best_prs)
+            pr_rows = get_best_pr_rows(supabase, user.id, limit=15)
+            if pr_rows:
+                editor_rows = [
+                    {
+                        "id": str(r["id"]),
+                        "exercise_name": r.get("exercise_name") or "",
+                        "sets": int(r.get("sets") or 1),
+                        "reps": int(r.get("reps") or 1),
+                        "weight_kg": float(r.get("weight_kg") or 0),
+                    }
+                    for r in pr_rows
+                ]
+                edited = st.data_editor(
+                    editor_rows,
+                    num_rows="fixed",
+                    key="pr_data_editor",
+                    column_config={
+                        "id": st.column_config.TextColumn("id", disabled=True, help="Row id"),
+                        "exercise_name": st.column_config.TextColumn("Exercise"),
+                        "sets": st.column_config.NumberColumn("Sets", min_value=1, step=1),
+                        "reps": st.column_config.NumberColumn("Reps", min_value=1, step=1),
+                        "weight_kg": st.column_config.NumberColumn("Weight (kg)", min_value=0.0, format="%.2f"),
+                    },
+                    hide_index=True,
+                )
+                if st.button("Save PR changes", key="save_pr_edits"):
+                    try:
+                        orig_by_id = {str(x["id"]): x for x in editor_rows}
+                        for row in edited:
+                            oid = str(row["id"])
+                            o = orig_by_id.get(oid)
+                            if not o:
+                                continue
+                            if (
+                                o["exercise_name"] == row["exercise_name"]
+                                and o["sets"] == int(row["sets"])
+                                and o["reps"] == int(row["reps"])
+                                and abs(o["weight_kg"] - float(row["weight_kg"])) < 1e-6
+                            ):
+                                continue
+                            update_workout_log(
+                                supabase,
+                                user.id,
+                                oid,
+                                str(row["exercise_name"]).strip(),
+                                int(row["sets"]),
+                                int(row["reps"]),
+                                float(row["weight_kg"]),
+                            )
+                        st.success("PR rows updated.")
+                        st.rerun()
+                    except Exception as ex:
+                        st.error(f"Could not save: {ex}")
+                del_options = [f"{r['exercise_name']} ({r['weight_kg']} kg)" for r in editor_rows]
+                del_ix = st.selectbox(
+                    "Delete a PR row (the underlying log entry)",
+                    options=list(range(len(del_options))),
+                    format_func=lambda i: del_options[i] if del_options else "—",
+                    key="pr_delete_pick",
+                )
+                if st.button("Delete selected row", key="delete_pr_row"):
+                    try:
+                        rid = editor_rows[int(del_ix)]["id"]
+                        delete_workout_log(supabase, user.id, rid)
+                        st.success("Deleted.")
+                        st.rerun()
+                    except Exception as ex:
+                        st.error(f"Could not delete: {ex}")
             else:
                 st.caption("No workout logs yet.")
         except Exception as e:
@@ -872,14 +836,19 @@ def show_chat_page():
             st.markdown(prompt)
 
         # Handle workout logging (explicit command + inferred workout statements).
-        workout_payload = _resolve_workout_payload(prompt, st.session_state.messages)
+        workout_payloads = _resolve_workout_payloads(prompt, st.session_state.messages)
         trace_id = None
-        if workout_payload:
-            signature = _build_workout_signature(workout_payload)
-            duplicate = st.session_state.get("last_logged_workout_signature") == signature
+        if workout_payloads:
+            duplicate_flags: list[bool] = []
             log_failed = False
             log_error: str | None = None
-            if not duplicate:
+            last_sig = st.session_state.get("last_logged_workout_signature")
+            for workout_payload in workout_payloads:
+                signature = _build_workout_signature(workout_payload)
+                duplicate = last_sig == signature
+                duplicate_flags.append(duplicate)
+                if duplicate:
+                    continue
                 try:
                     supabase = get_supabase_client()
                     log_workout(
@@ -893,13 +862,21 @@ def show_chat_page():
                     st.session_state.last_logged_workout_signature = signature
                 except Exception as e:
                     log_failed = True
-                    log_error = str(e)
-            hidden = _workout_turn_hidden_context(
-                payload=workout_payload,
-                duplicate=duplicate and not log_failed,
-                log_failed=log_failed,
-                log_error=log_error,
-            )
+                    log_error = (f"{log_error}; " if log_error else "") + str(e)
+            if len(workout_payloads) == 1:
+                hidden = _workout_turn_hidden_context(
+                    payload=workout_payloads[0],
+                    duplicate=bool(duplicate_flags[0]) and not log_failed,
+                    log_failed=log_failed,
+                    log_error=log_error,
+                )
+            else:
+                hidden = _workout_turn_hidden_context_multi(
+                    workout_payloads,
+                    duplicate_flags=duplicate_flags,
+                    log_failed=log_failed,
+                    log_error=log_error,
+                )
             response, trace_id = _run_model_reply(
                 user, profile, prompt, hidden_turn_context=hidden
             )

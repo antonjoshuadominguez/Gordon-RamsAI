@@ -2,6 +2,8 @@ import streamlit as st
 from supabase import create_client, Client
 import re
 
+from workout_parse import normalize_exercise_key
+
 PROFILE_TABLE = "user_profiles"
 CONVERSATIONS_TABLE = "conversations"
 CONVERSATION_MESSAGES_TABLE = "conversation_messages"
@@ -450,31 +452,42 @@ def save_meal_to_library(
     response = supabase_client.table("meal_library").insert(payload).execute()
     return response.data[0] if response.data else None
 
-def get_best_prs(supabase_client, user_id: str, limit: int = 10):
-    """Return one best PR row per exercise by weight, then reps."""
+def get_best_pr_rows(supabase_client, user_id: str, limit: int = 15):
+    """
+    One row per exercise (normalized key): highest weight_kg, then highest reps.
+    All historical rows stay in workout_logs; this is display / edit selection only.
+    """
     response = (
-        supabase_client
-        .table("workout_logs")
-        .select("exercise_name, reps, weight_kg")
-        .eq("user_id", user_id)
-        .order("weight_kg", desc=True)
-        .order("reps", desc=True)
-        .limit(500)
+        supabase_client.table("workout_logs")
+        .select("id, exercise_name, sets, reps, weight_kg, created_at")
+        .eq("user_id", str(user_id))
         .execute()
     )
     rows = response.data or []
-
-    best_by_exercise = {}
+    best: dict[str, dict] = {}
     for row in rows:
-        exercise = (row.get("exercise_name") or "").strip()
-        if not exercise:
+        key = normalize_exercise_key(row.get("exercise_name") or "")
+        if not key:
             continue
-        if exercise not in best_by_exercise:
-            best_by_exercise[exercise] = row
+        w = float(row.get("weight_kg") or 0)
+        r = int(row.get("reps") or 0)
+        prev = best.get(key)
+        if prev is None:
+            best[key] = row
+        else:
+            pw = float(prev.get("weight_kg") or 0)
+            pr = int(prev.get("reps") or 0)
+            if w > pw or (w == pw and r > pr):
+                best[key] = row
+    out = list(best.values())
+    out.sort(key=lambda x: (-float(x.get("weight_kg") or 0), -int(x.get("reps") or 0)))
+    return out[:limit]
 
-    best_rows = list(best_by_exercise.values())[:limit]
+
+def get_best_prs(supabase_client, user_id: str, limit: int = 10):
+    """Return display dicts for the PR table (best lift per exercise name)."""
     formatted = []
-    for row in best_rows:
+    for row in get_best_pr_rows(supabase_client, user_id, limit=limit):
         weight_value = float(row.get("weight_kg") or 0)
         weight_label = "bodyweight" if weight_value <= 0 else f"{weight_value:g} kg"
         formatted.append(
@@ -485,6 +498,31 @@ def get_best_prs(supabase_client, user_id: str, limit: int = 10):
             }
         )
     return formatted
+
+
+def update_workout_log(
+    supabase_client,
+    user_id: str,
+    log_id: str,
+    exercise_name: str,
+    sets: int,
+    reps: int,
+    weight_kg: float,
+):
+    """Update a single workout_logs row (must belong to user_id for RLS)."""
+    supabase_client.table("workout_logs").update(
+        {
+            "exercise_name": exercise_name.strip(),
+            "sets": max(1, int(sets)),
+            "reps": max(1, int(reps)),
+            "weight_kg": float(weight_kg),
+        }
+    ).eq("id", log_id).eq("user_id", str(user_id)).execute()
+
+
+def delete_workout_log(supabase_client, user_id: str, log_id: str):
+    """Delete one workout_logs row."""
+    supabase_client.table("workout_logs").delete().eq("id", log_id).eq("user_id", str(user_id)).execute()
 
 def get_current_user() -> dict:
     """Get the current authenticated user from session state."""
