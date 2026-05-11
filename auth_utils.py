@@ -8,6 +8,39 @@ PROFILE_TABLE = "user_profiles"
 CONVERSATIONS_TABLE = "conversations"
 CONVERSATION_MESSAGES_TABLE = "conversation_messages"
 
+SUPABASE_SECRETS_HELP = """Supabase is not configured.
+
+**Streamlit Community Cloud:** App → Manage app → Settings → Secrets. Paste (with your real values):
+
+[supabase]
+url = "https://YOUR_PROJECT.supabase.co"
+key = "YOUR_SUPABASE_ANON_KEY"
+
+Save secrets, then **Reboot** the app.
+
+**Local:** use the same `[supabase]` block in `.streamlit/secrets.toml`.
+
+Use the Supabase **Project URL** and the **anon public** key (Settings → API), not the service_role key.
+
+Docs: https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/secrets-management"""
+
+
+def supabase_secrets_available() -> tuple[str | None, str | None]:
+    """Return (url, key) if `st.secrets` has a usable Supabase section, else (None, None)."""
+    try:
+        sec = st.secrets["supabase"]
+    except Exception:
+        return None, None
+    try:
+        url = sec["url"]
+        key = sec["key"]
+    except Exception:
+        return None, None
+    if not url or not key:
+        return None, None
+    return str(url).strip(), str(key).strip()
+
+
 def _session_access_refresh(sess):
     """Extract access + refresh tokens from Streamlit-stored session (object or dict)."""
     if sess is None:
@@ -25,8 +58,9 @@ def get_supabase_client() -> Client:
     with ``set_session`` is required so Row Level Security policies
     (e.g. on ``conversations`` / ``conversation_messages``) see ``auth.uid()``.
     """
-    url = st.secrets["supabase"]["url"]
-    key = st.secrets["supabase"]["key"]
+    url, key = supabase_secrets_available()
+    if not url or not key:
+        raise RuntimeError(SUPABASE_SECRETS_HELP)
     client = create_client(url, key)
     access, refresh = _session_access_refresh(st.session_state.get("session"))
     if access and refresh:
@@ -147,6 +181,10 @@ def register_user(email: str, password: str, username: str) -> dict:
     
     except Exception as e:
         error_msg = str(e)
+        if "st.secrets has no key" in error_msg and "supabase" in error_msg.lower():
+            return {"success": False, "message": SUPABASE_SECRETS_HELP}
+        if "Supabase is not configured" in error_msg:
+            return {"success": False, "message": SUPABASE_SECRETS_HELP}
         lower_error = error_msg.lower()
         if "database error saving new user" in lower_error:
             return {
@@ -220,6 +258,10 @@ def login_user(email: str, password: str) -> dict:
     
     except Exception as e:
         error_msg = str(e)
+        if "st.secrets has no key" in error_msg and "supabase" in error_msg.lower():
+            return {"success": False, "message": SUPABASE_SECRETS_HELP}
+        if "Supabase is not configured" in error_msg:
+            return {"success": False, "message": SUPABASE_SECRETS_HELP}
         # Provide more helpful error messages
         if "Invalid login credentials" in error_msg or "Invalid password" in error_msg:
             return {"success": False, "message": "Invalid email or password."}
