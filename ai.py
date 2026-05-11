@@ -5,18 +5,76 @@ import re
 import random
 from langfuse import Langfuse
 
-# Initialize Google Gemini client
-try:
-    client = genai.Client(api_key=st.secrets["google"]["api_key"])
-except Exception as e:
-    client = None
+# Lazily created — import-time failures on Streamlit Cloud were silently cleared before.
+_GEMINI_CLIENT = None
+_GEMINI_INIT_ERROR: str | None = None
 
-# Initialize Langfuse client (optional)
+
+def _read_google_api_key() -> str | None:
+    """Resolve Gemini API key from several common Streamlit secrets layouts."""
+    try:
+        g = st.secrets.get("google")
+        if g is not None and hasattr(g, "get"):
+            k = g.get("api_key") or g.get("API_KEY")
+            if k:
+                return str(k).strip().strip('"').strip("'").lstrip("\ufeff")
+    except Exception:
+        pass
+    for name in ("GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_GENAI_API_KEY"):
+        try:
+            v = st.secrets[name]
+            if v:
+                return str(v).strip().strip('"').strip("'").lstrip("\ufeff")
+        except Exception:
+            continue
+    return None
+
+
+def ensure_gemini_client() -> bool:
+    """Create the Gemini client on first use; set ``_GEMINI_INIT_ERROR`` on failure."""
+    global _GEMINI_CLIENT, _GEMINI_INIT_ERROR
+    if _GEMINI_CLIENT is not None:
+        return True
+    key = _read_google_api_key()
+    if not key:
+        _GEMINI_INIT_ERROR = (
+            "No Gemini API key in secrets. Add `[google]` with `api_key = \"...\"`, "
+            "or a top-level `GOOGLE_API_KEY` / `GEMINI_API_KEY`. "
+            "On Streamlit Cloud use **Manage app → Settings → Secrets** (not the repo file)."
+        )
+        return False
+    try:
+        _GEMINI_CLIENT = genai.Client(api_key=key)
+        _GEMINI_INIT_ERROR = None
+        return True
+    except Exception as e:
+        _GEMINI_INIT_ERROR = f"{type(e).__name__}: {e}"[:500]
+        return False
+
+
+def gemini_unavailable_message() -> str:
+    """In-character + one line the operator can act on (no raw keys)."""
+    roast = (
+        "I would love to roast your macros, but this kitchen has no gas — the Gemini client "
+        "never came online. Check your **Streamlit Cloud secrets** (same shape as local "
+        "`secrets.toml`, but pasted in the dashboard) and your **Google AI Studio** key."
+    )
+    if _GEMINI_INIT_ERROR:
+        return f"{roast}\n\n*{_GEMINI_INIT_ERROR}*"
+    return roast
+
+
+# Initialize Langfuse client (optional — missing section must not crash import)
 try:
+    _lf = st.secrets["langfuse"]
+    try:
+        _lf_host = _lf["host"]
+    except Exception:
+        _lf_host = "https://cloud.langfuse.com"
     langfuse = Langfuse(
-        public_key=st.secrets["langfuse"]["public_key"],
-        secret_key=st.secrets["langfuse"]["secret_key"],
-        host=st.secrets["langfuse"].get("host", "https://cloud.langfuse.com")
+        public_key=_lf["public_key"],
+        secret_key=_lf["secret_key"],
+        host=_lf_host,
     )
 except Exception:
     langfuse = None
@@ -169,12 +227,8 @@ def generate_response(
     Returns:
         Tuple of (response_text, usage_data, langfuse_trace_id or None)
     """
-    if not client:
-        return (
-            "No API client — keys are missing and I am not doing mime work for free. Fix your secrets, donkey.",
-            {},
-            None,
-        )
+    if not ensure_gemini_client():
+        return gemini_unavailable_message(), {}, None
 
     last_user_msg = messages[-1]["content"]
 
@@ -312,7 +366,7 @@ def generate_response(
                 history.append(genai.types.Content(
                     role=role, parts=[genai.types.Part(text=msg["content"])]
                 ))
-            current_chat_data["gemini_session"] = client.chats.create(
+            current_chat_data["gemini_session"] = _GEMINI_CLIENT.chats.create(
                 model="gemini-2.5-flash-lite",
                 config=genai.types.GenerateContentConfig(system_instruction=system_prompt),
                 history=history,
