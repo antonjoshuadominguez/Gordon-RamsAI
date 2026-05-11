@@ -1,3 +1,4 @@
+import json
 import random
 import re
 
@@ -401,23 +402,14 @@ def _workout_turn_hidden_context(
     log_failed: bool,
     log_error: str | None,
 ) -> str:
-    """Facts for <kitchen_context>; model must not read this aloud as bookkeeping."""
+    """Short facts for <kitchen_context> (keep simple for the model)."""
     ex = payload["exercise"]
     s, r, w = payload["sets"], payload["reps"], payload["weight"]
     if log_failed:
-        return (
-            f"Workout save to the server FAILED ({log_error or 'unknown'}). "
-            "Stay in character: blame chaos on the pass / useless systems — no stack dumps, no JSON."
-        )
+        return f"Workout save failed ({log_error or 'unknown'}). Stay in character; do not quote errors verbatim."
     if duplicate:
-        return (
-            f"They already hammered this exact line earlier: {ex}, {s}×{r} @ {w}kg. "
-            "They sent it again. Roast the repeat — never say 'logged', 'database', or 'duplicate entry'."
-        )
-    return (
-        f"Their lift (your tone only — not a readout): {ex}, {s} sets × {r} reps @ {w}kg. "
-        "Back-office is handled. You respond only as Ramsay: hype, pressure, or disgust — never 'I have saved'."
-    )
+        return f"Duplicate send: {ex} {s}x{r} @ {w}kg. Roast them; do not say logged/database."
+    return f"They lifted {ex} {s}x{r} @ {w}kg. Hype or roast; do not say you saved anything."
 
 
 def _workout_turn_hidden_context_multi(
@@ -427,23 +419,12 @@ def _workout_turn_hidden_context_multi(
     log_failed: bool,
     log_error: str | None,
 ) -> str:
-    """Single kitchen_context when multiple lifts were parsed in one turn."""
     if log_failed:
-        return (
-            f"Workout save(s) FAILED ({log_error or 'unknown'}). "
-            "Stay in character about broken kit — no stack dumps."
-        )
+        return f"Workout save failed ({log_error or 'unknown'}). Stay in character; do not quote errors verbatim."
     if payloads and all(duplicate_flags):
-        return (
-            "They repeated the same lift line(s) you already stored. Roast the redundancy — "
-            "never say 'logged' or 'database'."
-        )
-    bits = [f"{p['exercise']}: {p['sets']}×{p['reps']} @ {p['weight']}kg" for p in payloads]
-    return (
-        "Their lift(s) this turn (for your tone only, not a spreadsheet readout): "
-        + "; ".join(bits)
-        + ". Back-office is handled — Ramsay reaction only, no 'I saved' talk."
-    )
+        return "Duplicate lifts. Roast them; do not say logged/database."
+    bits = [f"{p['exercise']} {p['sets']}x{p['reps']} @ {p['weight']}kg" for p in payloads]
+    return "They lifted: " + "; ".join(bits) + ". Hype or roast; do not say you saved anything."
 
 
 def _should_scan_history_for_workout(prompt: str) -> bool:
@@ -559,6 +540,92 @@ def show_login_page():
                     else:
                         st.error(result["message"])
 
+def _meaningful_pr_editor_rows(rows: list) -> list:
+    """Ignore empty trailing rows Streamlit adds with num_rows='dynamic'."""
+    out = []
+    for row in rows or []:
+        rid = str(row.get("id") or "").strip()
+        ex = str(row.get("exercise_name", "")).strip()
+        try:
+            w = float(row.get("weight_kg") or 0)
+        except (TypeError, ValueError):
+            w = 0.0
+        if rid or (ex and w > 0):
+            out.append(row)
+    return out
+
+
+def _canonical_pr_rows(rows: list) -> str:
+    """Stable JSON for detecting edits in the PR data editor."""
+    norm = []
+    for row in _meaningful_pr_editor_rows(rows or []):
+        rid = str(row.get("id") or "").strip()
+        ex = str(row.get("exercise_name", "")).strip()
+        try:
+            w = round(float(row.get("weight_kg") or 0), 3)
+        except (TypeError, ValueError):
+            w = 0.0
+        s, rps = int(row.get("sets") or 1), int(row.get("reps") or 1)
+        norm.append(
+            {"id": rid, "exercise_name": ex, "sets": s, "reps": rps, "weight_kg": w}
+        )
+    norm.sort(
+        key=lambda x: (x["id"], x["exercise_name"], x["weight_kg"], x["sets"], x["reps"])
+    )
+    return json.dumps(norm, sort_keys=True)
+
+
+def _persist_pr_editor(supabase, user_id: str, original_rows: list[dict], edited: list[dict]) -> None:
+    """Apply deletes, updates, and new rows from the PR table editor."""
+    orig_by_id = {str(r["id"]): r for r in original_rows if str(r.get("id") or "").strip()}
+    orig_ids = set(orig_by_id.keys())
+    cur_ids = {str(r.get("id") or "").strip() for r in edited if str(r.get("id") or "").strip()}
+    for oid in orig_ids - cur_ids:
+        delete_workout_log(supabase, user_id, oid)
+    for row in edited:
+        rid = str(row.get("id") or "").strip()
+        ex = str(row.get("exercise_name", "")).strip()
+        try:
+            w = float(row.get("weight_kg") or 0)
+        except (TypeError, ValueError):
+            w = 0.0
+        s, rps = int(row.get("sets") or 1), int(row.get("reps") or 1)
+        if not rid:
+            if ex and w > 0:
+                log_workout(
+                    supabase_client=supabase,
+                    user_id=user_id,
+                    exercise=ex,
+                    sets=s,
+                    reps=rps,
+                    weight=w,
+                )
+            continue
+        if rid in orig_by_id and (not ex or w <= 0):
+            delete_workout_log(supabase, user_id, rid)
+            continue
+        if rid not in orig_by_id:
+            if ex and w > 0:
+                log_workout(
+                    supabase_client=supabase,
+                    user_id=user_id,
+                    exercise=ex,
+                    sets=s,
+                    reps=rps,
+                    weight=w,
+                )
+            continue
+        o = orig_by_id[rid]
+        if (
+            str(o.get("exercise_name", "")).strip() == ex
+            and int(o.get("sets") or 1) == s
+            and int(o.get("reps") or 1) == rps
+            and abs(float(o.get("weight_kg") or 0) - w) < 1e-6
+        ):
+            continue
+        update_workout_log(supabase, user_id, rid, ex, s, rps, w)
+
+
 # ============================================================
 # EDIT PROFILE PAGE
 # ============================================================
@@ -633,10 +700,6 @@ def show_profile_page():
         st.info(f"**User ID:**\n`{user.id}`\n\n**Joined:**\n{profile.get('created_at', 'N/A')[:10]}")
         st.divider()
         st.subheader("🏆 Best Exercises / PRs")
-        st.caption(
-            "Shows your **best weight per exercise** (all attempts stay in history). "
-            "Edit values and click **Save PR changes**, or remove a bad row."
-        )
         try:
             supabase = get_supabase_client()
             pr_rows = get_best_pr_rows(supabase, user.id, limit=15)
@@ -651,12 +714,13 @@ def show_profile_page():
                     }
                     for r in pr_rows
                 ]
+                ver = int(st.session_state.get("pr_table_ver", 0))
                 edited = st.data_editor(
                     editor_rows,
-                    num_rows="fixed",
-                    key="pr_data_editor",
+                    num_rows="dynamic",
+                    key=f"pr_data_editor_{ver}",
                     column_config={
-                        "id": st.column_config.TextColumn("id", disabled=True, help="Row id"),
+                        "id": st.column_config.TextColumn("id", disabled=True),
                         "exercise_name": st.column_config.TextColumn("Exercise"),
                         "sets": st.column_config.NumberColumn("Sets", min_value=1, step=1),
                         "reps": st.column_config.NumberColumn("Reps", min_value=1, step=1),
@@ -664,49 +728,17 @@ def show_profile_page():
                     },
                     hide_index=True,
                 )
-                if st.button("Save PR changes", key="save_pr_edits"):
+                if edited is None:
+                    edited = editor_rows
+                c_ed = _canonical_pr_rows(edited)
+                c_db = _canonical_pr_rows(editor_rows)
+                if c_ed != c_db:
                     try:
-                        orig_by_id = {str(x["id"]): x for x in editor_rows}
-                        for row in edited:
-                            oid = str(row["id"])
-                            o = orig_by_id.get(oid)
-                            if not o:
-                                continue
-                            if (
-                                o["exercise_name"] == row["exercise_name"]
-                                and o["sets"] == int(row["sets"])
-                                and o["reps"] == int(row["reps"])
-                                and abs(o["weight_kg"] - float(row["weight_kg"])) < 1e-6
-                            ):
-                                continue
-                            update_workout_log(
-                                supabase,
-                                user.id,
-                                oid,
-                                str(row["exercise_name"]).strip(),
-                                int(row["sets"]),
-                                int(row["reps"]),
-                                float(row["weight_kg"]),
-                            )
-                        st.success("PR rows updated.")
+                        _persist_pr_editor(supabase, user.id, editor_rows, edited)
+                        st.session_state.pr_table_ver = ver + 1
                         st.rerun()
                     except Exception as ex:
-                        st.error(f"Could not save: {ex}")
-                del_options = [f"{r['exercise_name']} ({r['weight_kg']} kg)" for r in editor_rows]
-                del_ix = st.selectbox(
-                    "Delete a PR row (the underlying log entry)",
-                    options=list(range(len(del_options))),
-                    format_func=lambda i: del_options[i] if del_options else "—",
-                    key="pr_delete_pick",
-                )
-                if st.button("Delete selected row", key="delete_pr_row"):
-                    try:
-                        rid = editor_rows[int(del_ix)]["id"]
-                        delete_workout_log(supabase, user.id, rid)
-                        st.success("Deleted.")
-                        st.rerun()
-                    except Exception as ex:
-                        st.error(f"Could not delete: {ex}")
+                        st.error(f"Could not update PR table: {ex}")
             else:
                 st.caption("No workout logs yet.")
         except Exception as e:

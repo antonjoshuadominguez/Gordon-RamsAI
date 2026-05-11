@@ -29,11 +29,29 @@ INVALID_EXERCISE = frozenset(
         "rep",
         "set",
         "sets",
+        "each side",
+        "each arm",
+        "per side",
+        "per arm",
     }
 )
 
 _TRAILING_FOR = re.compile(r"\s+for\s*$", re.I)
 _LEAD_EX = re.compile(r"^(new|another|my|a|the)\s+", re.I)
+_LEAD_WORKOUT_VERB = re.compile(
+    r"^(?:i\s+)?(?:just\s+)?(?:did|done|hit|got|made)\s+",
+    re.I,
+)
+
+
+def _strip_leading_workout_verbs(raw: str) -> str:
+    s = (raw or "").strip()
+    while True:
+        n = _LEAD_WORKOUT_VERB.sub("", s, count=1)
+        if n == s:
+            break
+        s = n
+    return s.strip()
 
 
 def to_kg(value: float, unit: str) -> float:
@@ -53,6 +71,12 @@ def normalize_exercise_key(name: str) -> str:
     return s
 
 
+_END_LOAD_PHRASE = re.compile(
+    r"\s+((each|per)\s+(arm|side))|(each\s+arm)|(each\s+side)|(per\s+arm)|(per\s+side)|(as\s+well)\s*$",
+    re.I,
+)
+
+
 def normalize_exercise_display(raw: str) -> str | None:
     """Clean exercise label for DB; None if unusable."""
     if not raw:
@@ -60,6 +84,7 @@ def normalize_exercise_display(raw: str) -> str | None:
     s = re.sub(r"\s+", " ", str(raw).strip())
     s = _TRAILING_FOR.sub("", s).strip(" -–—:,.!?")
     s = _LEAD_EX.sub("", s).strip()
+    s = _END_LOAD_PHRASE.sub("", s).strip()
     key = s.lower()
     if len(key) < 2 or key in INVALID_EXERCISE:
         return None
@@ -89,6 +114,30 @@ def _parse_one_segment(norm: str) -> dict[str, Any] | None:
     """Try ordered patterns on one lowercase-normalized segment."""
     if not norm:
         return None
+
+    # 0a) "bicep curls 20kg each side" / "db row 80 lbs per arm"
+    m = re.search(
+        r"(?P<exercise>[a-z][a-z0-9\s'\-/]{2,58}?)\s+(?P<weight>\d+(?:\.\d+)?)\s*(?P<wunit>kg|lbs?)\b"
+        r"\s*(?:each\s+(?:side|arm)|per\s+(?:side|arm))\b",
+        norm,
+    )
+    if m:
+        ex_raw = _strip_leading_workout_verbs(m.group("exercise"))
+        r = _finalize(ex_raw, 1, 1, float(m.group("weight")), m.group("wunit"))
+        if r:
+            return r
+
+    # 0b) "squats for 150kg" (reps default 1; must not steal "squats for 8 reps at 100kg")
+    m = re.search(
+        r"(?P<exercise>(?!for\b)[a-z][a-z0-9\s'\-/]{2,58}?)\s+for\s+(?P<weight>\d+(?:\.\d+)?)\s*(?P<wunit>kg|lbs?)\b"
+        r"(?!\s+for\s+\d+\s*reps?)",
+        norm,
+    )
+    if m:
+        ex_raw = _strip_leading_workout_verbs(m.group("exercise"))
+        r = _finalize(ex_raw, 1, 1, float(m.group("weight")), m.group("wunit"))
+        if r:
+            return r
 
     # 1) "... leg press pr of 300kg for 8 reps" — exercise is the word run *immediately* before "pr"/"personal record"
     m = re.search(
