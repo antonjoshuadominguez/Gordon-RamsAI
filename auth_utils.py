@@ -4,7 +4,7 @@ import re
 
 from workout_parse import normalize_exercise_key
 
-PROFILE_TABLE = "user_profiles"
+PROFILE_TABLE = "profiles"
 CONVERSATIONS_TABLE = "conversations"
 CONVERSATION_MESSAGES_TABLE = "conversation_messages"
 

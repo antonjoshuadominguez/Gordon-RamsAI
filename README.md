@@ -5,7 +5,7 @@ Streamlit chat app that pairs **fitness and nutrition coaching** with a **Gordon
 ## Features
 
 - **Auth** — Register and sign in with Supabase; JWT is applied to the Supabase client so **RLS** policies see `auth.uid()`.
-- **Profiles** — `user_profiles` stores username, allergies, and fitness goals; the app can infer updates from chat.
+- **Profiles** — `profiles` stores username, allergies, and fitness goals; the app can infer updates from chat.
 - **Chats** — Conversations and messages are stored in Supabase (`conversations`, `conversation_messages`); sidebar loads history and supports new chats and deletes.
 - **Workouts** — Natural-language lines (and explicit “log this …” style commands) are parsed and written to `workout_logs`; the assistant reacts in character without dry “logged to database” copy.
 - **Meals** — Meal suggestions can include a structured block saved to `meal_library` (with allergy-aware search for context).
@@ -72,7 +72,7 @@ You need tables compatible with what `auth_utils.py` expects, including (names m
 | Area | Typical tables |
 |------|------------------|
 | Auth | Supabase Auth users |
-| Profile | `user_profiles` |
+| Profile | `profiles` |
 | Chats | `conversations`, `conversation_messages` |
 | Fitness | `workout_logs` |
 | Nutrition | `meal_library` |
