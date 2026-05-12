@@ -545,8 +545,8 @@ def save_meal_to_library(
 
     normalized_incoming = normalize_ingredients(ingredients)
 
-    # Exact-ingredient de-duplication:
-    # same normalized ingredient list (including quantities like 2 eggs vs 3 eggs) => treat as duplicate.
+    # Exact-ingredient de-duplication: same normalized list => duplicate. Different quantities
+    # (e.g. 2 eggs vs 3 eggs) => different list => stored as a separate meal.
     existing = supabase_client.table("meal_library").select("id, ingredients").execute()
     for row in (existing.data or []):
         existing_normalized = normalize_ingredients(row.get("ingredients") or [])

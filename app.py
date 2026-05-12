@@ -257,6 +257,7 @@ def _run_model_reply(user, profile, prompt: str, hidden_turn_context: str | None
         recent_workouts = []
 
     meal_context = []
+    meal_library_note = None
     is_meal_query = _is_meal_advice_query(prompt)
     if is_meal_query:
         allergies_raw = (profile.get("allergies") or "")
@@ -269,6 +270,18 @@ def _run_model_reply(user, profile, prompt: str, hidden_turn_context: str | None
                 allergies_list=allergies_list,
                 tags_filter=None,
             )
+            if allergies_list:
+                all_meals = search_meal_library(
+                    supabase_client=supabase,
+                    allergies_list=[],
+                    tags_filter=None,
+                )
+                if all_meals and not meal_context:
+                    meal_library_note = (
+                        "LIBRARY NOTE: The meal library contains recipes, but **every one** conflicts with this user's "
+                        "stated allergies. Do **not** recommend any library meal. Propose a **new** allergy-safe meal "
+                        "instead and include [MEAL_LIBRARY_RECORD] so it can be saved."
+                    )
         except Exception:
             meal_context = []
 
@@ -289,33 +302,46 @@ def _run_model_reply(user, profile, prompt: str, hidden_turn_context: str | None
                 recent_workouts=recent_workouts,
                 session_id=str(session_id) if session_id else None,
                 hidden_turn_context=hidden_turn_context,
+                meal_library_note=meal_library_note,
             )
-            if is_meal_query:
-                meal_record = _extract_meal_library_record(response)
-                if meal_record:
-                    try:
-                        if supabase is None:
-                            supabase = get_supabase_client()
-                        save_meal_to_library(
-                            supabase_client=supabase,
-                            name=meal_record["name"],
-                            ingredients=meal_record["ingredients"],
-                            instructions=meal_record["instructions"],
-                            calories=meal_record["calories"],
-                            macros_tags=meal_record["tags"],
-                        )
-                    except Exception:
-                        pass
-                response = _strip_meal_library_record(response)
+            meal_record = _extract_meal_library_record(response)
+            if meal_record:
+                try:
+                    if supabase is None:
+                        supabase = get_supabase_client()
+                    save_meal_to_library(
+                        supabase_client=supabase,
+                        name=meal_record["name"],
+                        ingredients=meal_record["ingredients"],
+                        instructions=meal_record["instructions"],
+                        calories=meal_record["calories"],
+                        macros_tags=meal_record["tags"],
+                    )
+                except Exception:
+                    pass
+            response = _strip_meal_library_record(response)
             return response, trace_id
         except Exception as e:
             return get_model_error_roast(str(e)[:160]), None
 
 
+_MEAL_QUERY_RE = re.compile(
+    r"\b(?:"
+    r"meals?|meal\s*plans?|diet|diets|nutrition|nutritious|calories|calorie|kcal|macros?|"
+    r"recipes?|foods?|cook(?:ing)?|chef|kitchen|"
+    r"breakfast|brunch|lunch|dinner|supper|snacks?|"
+    r"ingredients?|dishes?|menus?|grocery|groceries|"
+    r"what\s+(?:should|to)\s+i\s+eat|something\s+to\s+eat|eat\s+(?:something|healthy|cleaner)|"
+    r"hungry|starving|feast|buffet|"
+    r"high[\s-]protein\s+meal|low[\s-]carb\s+meal|budget\s+meal|cheap\s+meal|prep\s+meal"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
 def _is_meal_advice_query(prompt: str) -> bool:
-    prompt_lower = prompt.lower()
-    keywords = ["meal", "diet", "food", "recipe", "eat", "nutrition", "calories"]
-    return any(keyword in prompt_lower for keyword in keywords)
+    """True when the user is asking for food/cooking/meal guidance (word-boundary safe, no bare 'eat' substring)."""
+    return bool(_MEAL_QUERY_RE.search(prompt or ""))
 
 def _extract_meal_library_record(response_text: str):
     """Parse model-provided MEAL_LIBRARY_RECORD block."""

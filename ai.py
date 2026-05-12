@@ -267,6 +267,7 @@ def generate_response(
     recent_workouts=None,
     session_id: str | None = None,
     hidden_turn_context: str | None = None,
+    meal_library_note: str | None = None,
 ):
     """
     Generate a response from Gordon RamsAi.
@@ -342,12 +343,13 @@ def generate_response(
     recent_workouts = recent_workouts or []
 
     meal_context_lines = []
-    for meal in meal_context[:8]:
-        ingredients = ", ".join(meal.get("ingredients", [])[:8])
+    for meal in meal_context[:15]:
+        ingredients = ", ".join(meal.get("ingredients", [])[:12])
         meal_context_lines.append(
             f"- {meal.get('name', 'Unknown')} | Calories: {meal.get('calories', 'N/A')} | Ingredients: {ingredients}"
         )
     meal_context_text = "\n".join(meal_context_lines) if meal_context_lines else "No meal library context provided."
+    meal_note_block = f"\n    {meal_library_note.strip()}" if meal_library_note and meal_library_note.strip() else ""
 
     workout_context_lines = []
     for workout in recent_workouts[:5]:
@@ -395,10 +397,15 @@ def generate_response(
     Username: {safe_profile['username']} | Goal: {safe_profile['goal']} | Allergies: {safe_profile['allergies'] or 'None specified'}
 
     MEAL SAFETY AND LIBRARY USAGE:
-    - When giving meal recommendations, use the provided meal library context first.
+    - When giving meal or cooking recommendations, **prioritize reusing** a meal from SAFE MEAL LIBRARY RESULTS below
+      (same name and ingredients; you may lightly adapt wording). Only invent a brand-new recipe if the library is empty
+      or the special note below says every library meal is unsafe for this user.
     - Treat profile allergies as strict exclusions.
     - Never recommend ingredients that match profile allergies.
-    - If no safe meal exists, state that clearly and propose alternatives.
+    - If SAFE MEAL LIBRARY RESULTS is empty and the note does not say otherwise, propose a safe meal and still include
+      [MEAL_LIBRARY_RECORD] so it can be saved for reuse.
+    - For workout-only answers with no food or recipe, do **not** include [MEAL_LIBRARY_RECORD].
+    {meal_note_block}
 
     SAFE MEAL LIBRARY RESULTS:
     {meal_context_text}
@@ -407,8 +414,8 @@ def generate_response(
     {workout_context_text}
 
     CONSTRAINTS:
-    - For nutrition: list 5 key ingredients, estimated cost in PHP, prep time, macros (protein/carbs/fats in grams), and total kcal.
-    - For every meal recommendation, include this machine-readable block at the end:
+    - For nutrition or any concrete cooking/meal suggestion: list 5 key ingredients, estimated cost in PHP, prep time, macros (protein/carbs/fats in grams), and total kcal.
+    - Whenever you give a concrete meal or recipe (including reused library meals), include this machine-readable block at the **end** of your reply:
       [MEAL_LIBRARY_RECORD]
       name: <meal name>
       ingredients: <comma-separated ingredients WITH quantities, e.g. 3 eggs, 1 can chili tuna>
