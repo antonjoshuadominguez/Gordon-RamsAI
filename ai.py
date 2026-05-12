@@ -452,7 +452,7 @@ def generate_response(
                     role=role, parts=[genai.types.Part(text=msg["content"])]
                 ))
             current_chat_data["gemini_session"] = _GEMINI_CLIENT.chats.create(
-                model="gemini-2.5-flash-lite",
+                model="gemini-2.5-flash",
                 config=genai.types.GenerateContentConfig(system_instruction=system_prompt),
                 history=history,
             )
