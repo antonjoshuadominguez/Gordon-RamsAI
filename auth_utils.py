@@ -103,23 +103,41 @@ def _fallback_profile(user_id: str, email: str = "", username: str = "") -> dict
         "fitness_goals": "",
     }
 
+
+def _normalize_profile_row(row: dict | None) -> dict | None:
+    """SQL NULLs become empty strings so Streamlit widgets and comparisons behave."""
+    if not row:
+        return row
+    out = dict(row)
+    if out.get("allergies") is None:
+        out["allergies"] = ""
+    if out.get("fitness_goals") is None:
+        out["fitness_goals"] = ""
+    return out
+
+
 def _ensure_profile_row(user_id: str, username: str, email: str = "") -> dict:
     """Ensure a profile row exists and return it."""
     supabase = get_supabase_client()
     fallback_username = username if is_valid_username(username) else _safe_username_from_email(email)
     try:
-        upsert_response = supabase.table(PROFILE_TABLE).upsert(
-            {
-                "id": user_id,
-                "username": fallback_username,
-                "allergies": "",
-                "fitness_goals": ""
-            },
-            on_conflict="id"
-        ).execute()
+        upsert_response = (
+            supabase.table(PROFILE_TABLE)
+            .upsert(
+                {
+                    "id": user_id,
+                    "username": fallback_username,
+                    "allergies": "",
+                    "fitness_goals": "",
+                },
+                on_conflict="id",
+            )
+            .select("*")
+            .execute()
+        )
         if upsert_response.data:
-            return upsert_response.data[0]
-        return get_user_profile(user_id)
+            return _normalize_profile_row(upsert_response.data[0])
+        return _normalize_profile_row(get_user_profile(user_id))
     except Exception:
         return _fallback_profile(user_id=user_id, email=email, username=username)
 
@@ -247,6 +265,8 @@ def login_user(email: str, password: str) -> dict:
             profile = _ensure_profile_row(response.user.id, "", email)
             if not profile:
                 return {"success": False, "message": "Profile could not be created. Please try again."}
+
+        profile = _normalize_profile_row(profile)
         
         return {
             "success": True,
@@ -289,7 +309,7 @@ def get_user_profile(user_id: str) -> dict:
         supabase = get_supabase_client()
         response = supabase.table(PROFILE_TABLE).select("*").eq("id", user_id).execute()
         
-        return response.data[0] if response.data else None
+        return _normalize_profile_row(response.data[0]) if response.data else None
     
     except Exception as e:
         st.error(f"Error fetching profile: {str(e)}")
@@ -305,25 +325,36 @@ def update_user_profile(user_id: str, username: str, allergies: str, fitness_goa
     
     try:
         supabase = get_supabase_client()
-        
+        allergies = "" if allergies is None else str(allergies)
+        fitness_goals = "" if fitness_goals is None else str(fitness_goals)
         update_data = {
             "username": username,
             "allergies": allergies,
-            "fitness_goals": fitness_goals
+            "fitness_goals": fitness_goals,
         }
-        
-        response = supabase.table(PROFILE_TABLE).update(update_data).eq("id", user_id).execute()
-        
+
+        response = (
+            supabase.table(PROFILE_TABLE)
+            .update(update_data)
+            .eq("id", user_id)
+            .select("*")
+            .execute()
+        )
+
         if not response.data:
-            response = supabase.table(PROFILE_TABLE).upsert(
-                {"id": user_id, **update_data},
-                on_conflict="id"
-            ).execute()
+            response = (
+                supabase.table(PROFILE_TABLE)
+                .upsert({"id": user_id, **update_data}, on_conflict="id")
+                .select("*")
+                .execute()
+            )
 
         if response.data:
             return {"success": True, "message": "Profile updated successfully!"}
-        else:
-            return {"success": False, "message": "Failed to update profile."}
+        verify = get_user_profile(user_id)
+        if verify and verify.get("username") == username:
+            return {"success": True, "message": "Profile updated successfully!"}
+        return {"success": False, "message": "Failed to update profile."}
     
     except Exception as e:
         error_msg = str(e)

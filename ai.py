@@ -152,6 +152,43 @@ def get_fallback_message():
     return random.choice(roasts)
 
 
+def is_workout_log_correction_complaint(text: str) -> bool:
+    """User thinks an auto-logged workout entry is wrong — not generic training mistakes."""
+    t = (text or "").lower()
+    patterns = [
+        r"\b(logged|logging|recorded|record)\s+(wrong|incorrectly)",
+        r"\bwrong\s+(workout\s+)?log",
+        r"\bincorrect(ly)?\s+(logged|recorded|entry)",
+        r"\bfix\s+(my|the)\s+(workout\s+)?log",
+        r"\bnot\s+what\s+i\s+(lifted|did|logged)",
+        r"\byou(?:'ve| have)?\s+(logged|recorded)\s+(the\s+)?wrong",
+        r"\bmistake\s+(in|on)\s+(my|the)\s+(workout\s+)?log",
+        r"\b(that|it)('s| is)\s+wrong[,.]?\s+i\s+(only\s+)?(did|lifted)",
+    ]
+    return any(re.search(p, t) for p in patterns)
+
+
+def get_workout_log_correction_roast() -> str:
+    """Tell them to fix PRs in the app; Gordon is not a spreadsheet clerk."""
+    lines = [
+        (
+            "Oh, the log is wrong? **You** fix it — open your profile, edit the workout table, and stop expecting me to be your secretary. "
+            "I am up to my neck with other donkeys on the pass; I do not have time to play workout logger for every muppet in this kitchen. "
+            "Count yourself lucky anything got written down in the first place, even if your form is questionable."
+        ),
+        (
+            "Listen, donkey — if the numbers are off, **you** correct them in **your** logs. I am not running a spreadsheet while half the internet burns their rice. "
+            "Gordon is busy yelling at other idiots by the stoves. Be grateful I bothered to log your nonsense at all."
+        ),
+        (
+            "Wrong entry? Then edit it yourself in the profile PR table and stop moaning at me. "
+            "I have real catastrophes to manage — other people treating the gym like a nap room — and I am not your personal workout clerk. "
+            "It is a miracle your set even hit the database; now carry the tray and fix your own mistake."
+        ),
+    ]
+    return random.choice(lines)
+
+
 def get_busy_kitchen_message():
     """When the model/API is overloaded — pure Ramsay energy, no tech jargon."""
     lines = [
@@ -210,11 +247,11 @@ ALLOWED_DIETS = ["High Protein", "Low Carb", "Vegetarian", "Utilitarian Balanced
 
 def sanitize_profile(profile: dict) -> dict:
     # Extract fitness_goals from profile (could be a string with goals)
-    fitness_goals = profile.get("fitness_goals", "Utilitarian Health")
+    fitness_goals = profile.get("fitness_goals") or "Utilitarian Health"
     safe_goal = fitness_goals if fitness_goals in ALLOWED_GOALS else "Utilitarian Health"
     
     # Use allergies field directly from profile
-    allergies = profile.get("allergies", "")
+    allergies = profile.get("allergies") or ""
     
     return {
         "goal": safe_goal,
@@ -241,6 +278,35 @@ def generate_response(
         return gemini_unavailable_message(), {}, None
 
     last_user_msg = messages[-1]["content"]
+
+    if is_workout_log_correction_complaint(last_user_msg):
+        fallback = get_workout_log_correction_roast()
+        trace_id = None
+        if _langfuse_usable() and user_id:
+            try:
+                trace_id = langfuse.create_trace_id()
+                with propagate_attributes(
+                    user_id=str(user_id),
+                    session_id=str(session_id) if session_id else None,
+                    trace_name="Gordon RamsAi Chat",
+                ):
+                    with langfuse.start_as_current_observation(
+                        trace_context={"trace_id": trace_id},
+                        name="gordon_ramsai_workout_log_complaint",
+                        as_type="span",
+                        input=last_user_msg,
+                        output=fallback,
+                        metadata={"shortcut": "workout_log_complaint"},
+                    ):
+                        pass
+                langfuse.flush()
+            except Exception:
+                trace_id = None
+                try:
+                    langfuse.flush()
+                except Exception:
+                    pass
+        return fallback, {}, trace_id
 
     if is_prompt_injection(last_user_msg):
         fallback = get_fallback_message()

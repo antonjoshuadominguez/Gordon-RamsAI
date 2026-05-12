@@ -656,14 +656,14 @@ def show_profile_page():
         
         allergies = st.text_area(
             "Allergies (optional)",
-            value=profile.get("allergies", ""),
+            value=(profile.get("allergies") or ""),
             placeholder="e.g., Peanuts, Shellfish, Dairy",
             help="List any food allergies or dietary restrictions"
         )
         
         fitness_goals = st.text_area(
             "Fitness Goals (optional)",
-            value=profile.get("fitness_goals", ""),
+            value=(profile.get("fitness_goals") or ""),
             placeholder="e.g., Lose 10kg in 3 months, Build muscle, Improve endurance",
             help="Describe your fitness goals and what you want to achieve"
         )
