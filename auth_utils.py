@@ -398,6 +398,34 @@ def _extract_fitness_goal(message: str) -> str:
 
     return ""
 
+
+def _merge_allergy_strings(existing: str, newly_extracted: str) -> str:
+    """Combine existing allergies with a new phrase; dedupe case-insensitively."""
+    existing = (existing or "").strip()
+    newly_extracted = (newly_extracted or "").strip()
+    if not newly_extracted:
+        return existing
+    if not existing:
+        return newly_extracted
+
+    def _split_allergy_phrase(s: str) -> list[str]:
+        parts: list[str] = []
+        for chunk in re.split(r"\s*,\s*|\s*;\s*|\s+and\s+", s, flags=re.IGNORECASE):
+            p = chunk.strip(" ,.;")
+            if p:
+                parts.append(p)
+        return parts
+
+    ordered: list[str] = []
+    seen_lower: set[str] = set()
+    for p in _split_allergy_phrase(existing) + _split_allergy_phrase(newly_extracted):
+        k = p.lower()
+        if k not in seen_lower:
+            seen_lower.add(k)
+            ordered.append(p)
+    return ", ".join(ordered)
+
+
 def persist_profile_from_chat(user_id: str, profile: dict, message: str) -> dict:
     """
     Persist discovered allergy/goal details from chat to user profile.
@@ -412,8 +440,18 @@ def persist_profile_from_chat(user_id: str, profile: dict, message: str) -> dict
     existing_allergies = (profile.get("allergies") or "").strip()
     existing_goal = (profile.get("fitness_goals") or "").strip()
 
-    new_allergies = existing_allergies or extracted_allergies
-    new_goal = existing_goal or extracted_goal
+    if extracted_allergies:
+        if existing_allergies:
+            new_allergies = _merge_allergy_strings(existing_allergies, extracted_allergies)
+        else:
+            new_allergies = extracted_allergies.strip()
+    else:
+        new_allergies = existing_allergies
+
+    if extracted_goal:
+        new_goal = extracted_goal.strip()
+    else:
+        new_goal = existing_goal
 
     if new_allergies == existing_allergies and new_goal == existing_goal:
         return profile
